@@ -59,27 +59,30 @@ const LINE_CONFIG: Record<LineKey, { name: string; cta: string; voice: string; p
 const SYSTEM_PROMPT = `Eres "El Veci" — el primer asistente local por mensaje con AI de Puerto Rico. Copiloto del Pueblo de Cabo Rojo.
 
 PERSONALIDAD:
-- Hablas español casual puertorriqueño (boricua)
-- Usas "veci" como forma cariñosa
-- Eres útil, directo, y con sabor local
+- Español casual boricua, usas "veci" como forma cariñosa
+- Directo, útil, con sabor local
 - Conoces Cabo Rojo como la palma de tu mano
-- Respuestas CORTAS (máximo 300 caracteres para SMS, 500 para WhatsApp)
-- Si no sabes algo, dilo con honestidad
+
+FORMATO OBLIGATORIO:
+- MÁXIMO 2-3 oraciones de texto conversacional
+- Luego lista los negocios/eventos relevantes en formato compacto
+- SMS: nombre + teléfono solamente (ultra breve)
+- WhatsApp: nombre + teléfono + emoji (un poco más detallado)
+- NUNCA copies la descripción completa de un negocio
+- NUNCA excedas 280 caracteres para SMS o 450 para WhatsApp
 
 CAPACIDADES:
 - Recomendar restaurantes, negocios, servicios de Cabo Rojo
 - Informar sobre eventos locales
 - Buscar servicios específicos (plomero, doctor, mecánico, etc.)
 - Dar info turística de Cabo Rojo
-- Agendar citas con Angel/Noelia
 
 REGLAS:
 - NUNCA inventes negocios o datos que no estén en el contexto
-- Si hay resultados de búsqueda, úsalos para responder
-- Incluye teléfono y mapa cuando estén disponibles
-- Si no hay resultados, sugiere que escriban diferente o prueben otra categoría
-- Para WhatsApp puedes usar emojis moderadamente
-- Para SMS sé más breve, sin emojis innecesarios`
+- Si hay resultados, úsalos. Incluye teléfono SIEMPRE que esté disponible
+- Si no hay resultados, sugiere otra búsqueda
+- Si no sabes algo, dilo con honestidad
+- NO uses formato markdown, asteriscos ni negritas — texto plano solamente`
 
 /* ──────────────────────── UTILITIES ────────────────────────── */
 function escapeXml(s: string): string {
@@ -102,6 +105,14 @@ function lineFromTo(to?: string | null): LineKey {
 function looksLikeStop(t: string) { return /^(stop|basta|cancel|quit|unsubscribe)$/i.test(t.trim()) }
 function looksLikeStart(t: string) { return /^(start|reanudar|resume|unstop)$/i.test(t.trim()) }
 
+function nowPR(): string {
+  return new Date().toLocaleString('es-PR', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: 'America/Puerto_Rico'
+  })
+}
+
 /* ──────────────────── OPENAI HELPERS ──────────────────────── */
 async function getEmbedding(text: string): Promise<number[]> {
   const res = await fetch('https://api.openai.com/v1/embeddings', {
@@ -113,7 +124,7 @@ async function getEmbedding(text: string): Promise<number[]> {
   return json.data?.[0]?.embedding || []
 }
 
-async function chatCompletion(messages: Array<{role: string; content: string}>, maxTokens = 250): Promise<string> {
+async function chatCompletion(messages: Array<{role: string; content: string}>, maxTokens = 200): Promise<string> {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
@@ -162,28 +173,33 @@ async function getHistory(contact: string, channel: string): Promise<string> {
   })
   if (!data || !data.length) return ''
   return data.reverse().map((m: {direction: string; body: string}) =>
-    `${m.direction === 'inbound' ? 'Usuario' : 'Veci'}: ${(m.body || '').slice(0, 200)}`
+    `${m.direction === 'inbound' ? 'Usuario' : 'Veci'}: ${(m.body || '').slice(0, 150)}`
   ).join('\n')
 }
 
-/* ──────────────── FORMAT RESULTS ──────────────────────────── */
-function formatPlaces(places: PlaceRow[]): string {
+/* ──────────────── FORMAT RESULTS (v42 — COMPACT) ─────────── */
+function formatPlaces(places: PlaceRow[], channel: string): string {
   return places.map(p => {
-    const contact = p.phone || (p.contact_info as Record<string, string>)?.phone || (p.contact_info as Record<string, string>)?.whatsapp || ''
-    const map = p.gmaps_url ? ` | 🗺️ ${p.gmaps_url}` : ''
-    const ph = contact ? ` | 📞 ${contact}` : ''
-    return `• ${p.name}${p.address ? ` (${p.address})` : ''} — ${p.one_liner || p.description || p.category}${ph}${map}`
+    const ph = p.phone || (p.contact_info as Record<string, string>)?.phone || ''
+    const liner = (p.one_liner || p.category || '').slice(0, 60)
+    if (channel === 'sms') {
+      return `${p.name}${ph ? ' ' + ph : ''}`
+    }
+    return `${p.name} — ${liner}${ph ? '\n  Tel: ' + ph : ''}`
   }).join('\n')
 }
 
-function formatEvents(events: EventRow[]): string {
+function formatEvents(events: EventRow[], channel: string): string {
   return events.map(e => {
     const when = e.start_time ? new Date(e.start_time).toLocaleString('es-PR', {
-      weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-      hour12: true, timeZone: 'America/Puerto_Rico'
-    }) : 'Fecha por confirmar'
-    const ticket = e.ticket_link ? ` | 🎟️ ${e.ticket_link}` : ''
-    return `• ${e.title}${e.location_name ? ` @ ${e.location_name}` : ''} — ${when}${ticket}`
+      weekday: 'short', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true,
+      timeZone: 'America/Puerto_Rico'
+    }) : 'Fecha TBD'
+    if (channel === 'sms') {
+      return `${e.title} — ${when}`
+    }
+    return `${e.title}${e.location_name ? ' @ ' + e.location_name : ''} — ${when}`
   }).join('\n')
 }
 
@@ -248,10 +264,10 @@ async function touchConversation(p: {
 function keywordFallback(text: string, line: LineKey): string {
   const n = text.toLowerCase().trim()
   if (/^(menu|opciones|ayuda|help|comandos?)$/i.test(n)) {
-    return 'COMANDOS:\n• Pregúntame lo que quieras en lenguaje natural\n• COMER — restaurantes\n• RADAR — eventos\n• CITA — agendar con Angel\n• STOP — salir'
+    return 'Preguntame lo que quieras veci! COMER, RADAR (eventos), CITA (agendar), o pregunta libre. STOP para salir.'
   }
   if (/\b(cita|agenda|angel|reunion)\b/i.test(n)) {
-    return 'Perfecto veci. Dime tema + día y te envío el link para agendar con Angel.'
+    return 'Dale veci. Dime tema + dia y te envio el link para agendar con Angel.'
   }
   if (/\b(demo|servicio|bot)\b/i.test(n) && line === '7711') {
     return 'Demo express: te lo monto en 90 min con tus FAQs y WhatsApp. Responde con tu negocio + volumen de mensajes.'
@@ -295,7 +311,7 @@ Deno.serve(async (req: Request) => {
 
   // Status callback
   if (!body && msgStatus) return new Response(null, { status: 204 })
-  if (!body) return new Response(twiml('Escríbeme en texto y te contesto.'), { headers: { 'Content-Type': 'text/xml' } })
+  if (!body) return new Response(twiml('Escribeme en texto y te contesto, veci.'), { headers: { 'Content-Type': 'text/xml' } })
 
   // Identity
   const identity = await upsertIdentity({ from, channel, profileName, waId, direction: 'inbound' })
@@ -348,41 +364,40 @@ Deno.serve(async (req: Request) => {
       ])
 
       // 3. Build context for AI
-      let context = ''
+      let context = `\n\nFECHA/HORA ACTUAL: ${nowPR()}`
       if (places.length) {
-        context += `\n\nNEGOCIOS/LUGARES RELEVANTES:\n${formatPlaces(places)}`
+        context += `\n\nNEGOCIOS RELEVANTES:\n${formatPlaces(places, channel)}`
         detectedIntent = 'ai_places'
       }
       if (events.length) {
-        context += `\n\nEVENTOS PRÓXIMOS:\n${formatEvents(events)}`
+        context += `\n\nEVENTOS PROXIMOS:\n${formatEvents(events, channel)}`
         detectedIntent = events.length && !places.length ? 'ai_events' : detectedIntent
       }
       if (!places.length && !events.length) {
-        context += '\n\nNo encontré resultados relevantes en la base de datos para esta consulta.'
+        context += '\n\nNo encontre resultados relevantes en la base de datos.'
       }
 
-      let historyContext = ''
-      if (history) {
-        historyContext = `\n\nHISTORIAL RECIENTE:\n${history}`
-      }
-
-      const maxChars = channel === 'whatsapp' ? 500 : 300
+      const historyContext = history ? `\n\nHISTORIAL:\n${history}` : ''
+      const maxChars = channel === 'whatsapp' ? 450 : 280
 
       // 4. Call AI
       const aiMessages = [
-        { role: 'system', content: `${SYSTEM_PROMPT}\n\n${cfg.personality}\n\nCanal: ${channel}. Máximo ${maxChars} caracteres en tu respuesta.${context}${historyContext}` },
+        { role: 'system', content: `${SYSTEM_PROMPT}\n\n${cfg.personality}\n\nCanal: ${channel}. MAXIMO ${maxChars} caracteres.${context}${historyContext}` },
         { role: 'user', content: body },
       ]
 
-      reply = await chatCompletion(aiMessages, channel === 'whatsapp' ? 300 : 200)
+      reply = await chatCompletion(aiMessages, channel === 'whatsapp' ? 250 : 150)
 
-      // Trim if too long for SMS
-      if (channel === 'sms' && reply.length > 1500) {
+      // Hard trim safety net
+      if (channel === 'sms' && reply.length > 320) {
+        reply = reply.slice(0, 317) + '...'
+      }
+      if (channel === 'whatsapp' && reply.length > 1500) {
         reply = reply.slice(0, 1497) + '...'
       }
     } catch (err) {
-      console.error('AI error, falling back:', err)
-      reply = `Soy ${cfg.name}. Ahora mismo tengo un problemita técnico. Escribe MENU para ver opciones.`
+      console.error('AI error:', err)
+      reply = `Soy ${cfg.name}. Tengo un problemita tecnico. Escribe MENU para opciones.`
       detectedIntent = 'ai_error'
     }
   } else {
